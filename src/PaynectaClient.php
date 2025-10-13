@@ -11,6 +11,7 @@ use Paynecta\LaravelSdk\Exceptions\NotFoundException;
 use Paynecta\LaravelSdk\Exceptions\RateLimitException;
 use Paynecta\LaravelSdk\Services\PaymentLinkService;
 use Paynecta\LaravelSdk\Services\PaymentService;
+use Paynecta\LaravelSdk\Services\BankService;
 
 class PaynectaClient
 {
@@ -22,6 +23,7 @@ class PaynectaClient
     
     protected ?PaymentLinkService $paymentLinkService = null;
     protected ?PaymentService $paymentService = null;
+    protected ?BankService $bankService = null;
 
     public function __construct(?string $apiKey = null, ?string $email = null)
     {
@@ -64,6 +66,20 @@ class PaynectaClient
         }
         
         return $this->paymentService;
+    }
+
+    /**
+     * Get Bank Service instance
+     * 
+     * @return BankService
+     */
+    public function banks(): BankService
+    {
+        if (!$this->bankService) {
+            $this->bankService = new BankService($this);
+        }
+        
+        return $this->bankService;
     }
 
     /**
