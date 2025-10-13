@@ -38,7 +38,7 @@ class PaymentService
      */
     public function initialize(string $code, string $mobileNumber, float|int $amount): array
     {
-        return $this->client->post('/payments/initialize', [
+return $this->client->post('/payment/initialize', [
             'code' => $code,
             'mobile_number' => $this->formatMobileNumber($mobileNumber),
             'amount' => $amount
