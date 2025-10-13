@@ -9,6 +9,8 @@ use Paynecta\LaravelSdk\Exceptions\AuthenticationException;
 use Paynecta\LaravelSdk\Exceptions\ValidationException;
 use Paynecta\LaravelSdk\Exceptions\NotFoundException;
 use Paynecta\LaravelSdk\Exceptions\RateLimitException;
+use Paynecta\LaravelSdk\Services\PaymentLinkService;
+use Paynecta\LaravelSdk\Services\PaymentService;
 
 class PaynectaClient
 {
@@ -17,6 +19,9 @@ class PaynectaClient
     protected string $baseUrl;
     protected int $timeout;
     protected bool $logging;
+    
+    protected ?PaymentLinkService $paymentLinkService = null;
+    protected ?PaymentService $paymentService = null;
 
     public function __construct(?string $apiKey = null, ?string $email = null)
     {
@@ -31,6 +36,34 @@ class PaynectaClient
                 'API Key and Email are required. Set PAYNECTA_API_KEY and PAYNECTA_EMAIL in your .env file.'
             );
         }
+    }
+
+    /**
+     * Get Payment Link Service instance
+     * 
+     * @return PaymentLinkService
+     */
+    public function paymentLinks(): PaymentLinkService
+    {
+        if (!$this->paymentLinkService) {
+            $this->paymentLinkService = new PaymentLinkService($this);
+        }
+        
+        return $this->paymentLinkService;
+    }
+
+    /**
+     * Get Payment Service instance
+     * 
+     * @return PaymentService
+     */
+    public function payments(): PaymentService
+    {
+        if (!$this->paymentService) {
+            $this->paymentService = new PaymentService($this);
+        }
+        
+        return $this->paymentService;
     }
 
     /**
@@ -54,7 +87,7 @@ class PaynectaClient
      * @return array
      * @throws PaynectaException
      */
-    protected function get(string $endpoint, array $params = []): array
+    public function get(string $endpoint, array $params = []): array
     {
         return $this->request('GET', $endpoint, $params);
     }
@@ -67,7 +100,7 @@ class PaynectaClient
      * @return array
      * @throws PaynectaException
      */
-    protected function post(string $endpoint, array $data = []): array
+    public function post(string $endpoint, array $data = []): array
     {
         return $this->request('POST', $endpoint, $data);
     }
@@ -80,7 +113,7 @@ class PaynectaClient
      * @return array
      * @throws PaynectaException
      */
-    protected function put(string $endpoint, array $data = []): array
+    public function put(string $endpoint, array $data = []): array
     {
         return $this->request('PUT', $endpoint, $data);
     }
@@ -92,7 +125,7 @@ class PaynectaClient
      * @return array
      * @throws PaynectaException
      */
-    protected function delete(string $endpoint): array
+    public function delete(string $endpoint): array
     {
         return $this->request('DELETE', $endpoint);
     }
