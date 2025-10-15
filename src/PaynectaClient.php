@@ -12,6 +12,7 @@ use Paynecta\LaravelSdk\Exceptions\RateLimitException;
 use Paynecta\LaravelSdk\Services\PaymentLinkService;
 use Paynecta\LaravelSdk\Services\PaymentService;
 use Paynecta\LaravelSdk\Services\BankService;
+use Paynecta\LaravelSdk\Services\CurrencyRatesService;
 
 class PaynectaClient
 {
@@ -24,6 +25,7 @@ class PaynectaClient
     protected ?PaymentLinkService $paymentLinkService = null;
     protected ?PaymentService $paymentService = null;
     protected ?BankService $bankService = null;
+    protected ?CurrencyRatesService $currencyRatesService = null;
 
     public function __construct(?string $apiKey = null, ?string $email = null)
     {
@@ -80,6 +82,20 @@ class PaynectaClient
         }
         
         return $this->bankService;
+    }
+
+    /**
+     * Get Currency Rates Service instance
+     * 
+     * @return CurrencyRatesService
+     */
+    public function currencyRates(): CurrencyRatesService
+    {
+        if (!$this->currencyRatesService) {
+            $this->currencyRatesService = new CurrencyRatesService($this);
+        }
+        
+        return $this->currencyRatesService;
     }
 
     /**

@@ -152,7 +152,33 @@ if (Paynecta::payments()->isFailed($status)) {
 $finalStatus = Paynecta::payments()->pollStatus($reference, 30, 2);
 ```
 
-### 4. Banks
+### 4. Currency Rates
+
+```php
+use Paynecta\LaravelSdk\Facades\Paynecta;
+
+// Get all currency rates (160+ currencies)
+$rates = Paynecta::currencyRates()->getAll();
+
+// Get specific currency rate
+$usdRate = Paynecta::currencyRates()->get('USD');
+
+// Convert currency
+$converted = Paynecta::currencyRates()->convert(100, 'USD', 'KES');
+
+// Convert with specific date
+$converted = Paynecta::currencyRates()->convert(100, 'USD', 'KES', '2025-10-01');
+
+// Get historical rates
+$history = Paynecta::currencyRates()->getHistory('KES', 'USD', '2025-10-01', '2025-10-13');
+
+// Helper methods
+$rate = Paynecta::currencyRates()->getRate($usdRate);
+$amount = Paynecta::currencyRates()->getConvertedAmount($converted);
+$allRates = Paynecta::currencyRates()->getRates($rates);
+```
+
+### 5. Banks
 
 ```php
 use Paynecta\LaravelSdk\Facades\Paynecta;
@@ -182,7 +208,7 @@ $list = Paynecta::banks()->getAllAsList();
 $grouped = Paynecta::banks()->getGroupedByLetter();
 ```
 
-### 5. Webhooks
+### 6. Webhooks
 
 #### Setup Webhook URL
 
@@ -533,6 +559,15 @@ Route::get('/test-payment', function () {
 - `banks()->getForDropdown()` - Get for select dropdown
 - `banks()->getAllAsList()` - Get as simple list
 - `banks()->getGroupedByLetter()` - Get grouped by first letter
+
+### Currency Rates
+- `currencyRates()->getAll()` - Get all currency rates (160+ currencies)
+- `currencyRates()->get($currency)` - Get specific currency rate
+- `currencyRates()->convert($amount, $from, $to, $date)` - Convert currency amounts
+- `currencyRates()->getHistory($from, $to, $startDate, $endDate)` - Get historical rates
+- `currencyRates()->getRate($response)` - Extract rate from response
+- `currencyRates()->getConvertedAmount($response)` - Extract converted amount
+- `currencyRates()->getRates($response)` - Extract rates array
 
 ## Changelog
 
