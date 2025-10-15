@@ -114,7 +114,7 @@ use Paynecta\LaravelSdk\Facades\Paynecta;
 $payment = Paynecta::payments()->initialize(
     'ABC123',           // Payment link code
     '254700000000',     // Mobile number
-    100                 // Amount in KES (1-70,000)
+    100                 // Amount in KES (1-250,000)
 );
 
 // With validation

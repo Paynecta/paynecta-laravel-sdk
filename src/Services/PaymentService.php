@@ -17,7 +17,7 @@ class PaymentService
      * 
      * @param string $code Payment link unique code
      * @param string $mobileNumber Safaricom mobile number (without + prefix)
-     * @param float|int $amount Payment amount in KES (min: 1, max: 70000)
+     * @param float|int $amount Payment amount in KES (min: 1, max: 250000)
      * @return array
      * @throws \Paynecta\LaravelSdk\Exceptions\ValidationException
      * @throws \Paynecta\LaravelSdk\Exceptions\NotFoundException
@@ -58,8 +58,8 @@ return $this->client->post('/payment/initialize', [
     public function initializeWithValidation(string $code, string $mobileNumber, float|int $amount): array
     {
         // Validate amount
-        if ($amount < 1 || $amount > 70000) {
-            throw new \InvalidArgumentException('Amount must be between 1 and 70,000 KES');
+        if ($amount < 1 || $amount > 250000) {
+            throw new \InvalidArgumentException('Amount must be between 1 and 250,000 KES');
         }
 
         // Validate mobile number
