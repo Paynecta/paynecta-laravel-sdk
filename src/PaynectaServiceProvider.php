@@ -4,73 +4,64 @@ namespace Paynecta\LaravelSdk;
 
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
+use Paynecta\LaravelSdk\Console\RegisterWebhookCommand;
+use Paynecta\LaravelSdk\Http\Controllers\WebhookController;
 use Paynecta\LaravelSdk\Services\WebhookService;
 
 class PaynectaServiceProvider extends ServiceProvider
 {
     /**
-     * Register services.
+     * Reported when this application registers itself, so somebody looking
+     * at a shop that is behaving oddly can see which version it runs.
      */
+    public const VERSION = '2.0.0';
+
     public function register(): void
     {
-        // Merge package config with app config
-        $this->mergeConfigFrom(
-            __DIR__.'/config/paynecta.php', 'paynecta'
-        );
+        $this->mergeConfigFrom(__DIR__ . '/config/paynecta.php', 'paynecta');
 
-        // Register the main Paynecta client as a singleton
-        $this->app->singleton('paynecta', function ($app) {
-            return new PaynectaClient(
-                config('paynecta.api_key'),
-                config('paynecta.email')
-            );
-        });
-
-        // Create an alias for dependency injection
-        $this->app->alias('paynecta', PaynectaClient::class);
-
-        // Register webhook service
-        $this->app->singleton(WebhookService::class, function ($app) {
-            return new WebhookService();
-        });
+        // Singletons. The client caches an access token in memory as well as
+        // in the cache store, and a new instance per resolve would throw
+        // that away on every call.
+        $this->app->singleton(PaynectaClient::class, fn () => new PaynectaClient());
+        $this->app->singleton(WebhookService::class, fn () => new WebhookService());
+        $this->app->alias(PaynectaClient::class, 'paynecta');
     }
 
-    /**
-     * Bootstrap services.
-     */
     public function boot(): void
     {
-        // Publish config file when running in console
+        $this->publishes([
+            __DIR__ . '/config/paynecta.php' => config_path('paynecta.php'),
+        ], 'paynecta-config');
+
+        $this->registerWebhookRoute();
+
         if ($this->app->runningInConsole()) {
-            $this->publishes([
-                __DIR__.'/config/paynecta.php' => config_path('paynecta.php'),
-            ], 'paynecta-config');
+            $this->commands([RegisterWebhookCommand::class]);
+        }
+    }
+
+    /**
+     * The route deliveries arrive on.
+     *
+     * No CSRF and no 'web' group: a webhook is a server posting to you, and
+     * it carries no session and no token. What stands in for that is the
+     * signature, checked before the body is read.
+     *
+     * Not registered when there is no path configured, so an application
+     * that handles deliveries its own way is not also given ours.
+     */
+    protected function registerWebhookRoute(): void
+    {
+        $path = config('paynecta.webhook_path');
+        if (! is_string($path) || trim($path) === '') {
+            return;
         }
 
-        // Register webhook routes
-        $this->registerRoutes();
-    }
-
-    /**
-     * Register webhook routes
-     */
-    protected function registerRoutes(): void
-    {
         Route::group([
             'middleware' => config('paynecta.webhook_middleware', ['api']),
-        ], function () {
-            Route::post(
-                config('paynecta.webhook_path', 'paynecta/webhook'),
-                [\Paynecta\LaravelSdk\Http\Controllers\WebhookController::class, 'handle']
-            )->name('paynecta.webhook');
+        ], function () use ($path) {
+            Route::post($path, WebhookController::class)->name('paynecta.webhook');
         });
-    }
-
-    /**
-     * Get the services provided by the provider.
-     */
-    public function provides(): array
-    {
-        return ['paynecta', PaynectaClient::class, WebhookService::class];
     }
 }

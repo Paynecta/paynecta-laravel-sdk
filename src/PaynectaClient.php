@@ -2,295 +2,307 @@
 
 namespace Paynecta\LaravelSdk;
 
+use Illuminate\Http\Client\PendingRequest;
+use Illuminate\Http\Client\Response;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use Paynecta\LaravelSdk\Exceptions\PaynectaException;
 use Paynecta\LaravelSdk\Exceptions\AuthenticationException;
-use Paynecta\LaravelSdk\Exceptions\ValidationException;
 use Paynecta\LaravelSdk\Exceptions\NotFoundException;
+use Paynecta\LaravelSdk\Exceptions\PaynectaException;
 use Paynecta\LaravelSdk\Exceptions\RateLimitException;
-use Paynecta\LaravelSdk\Services\PaymentLinkService;
-use Paynecta\LaravelSdk\Services\PaymentService;
+use Paynecta\LaravelSdk\Exceptions\ValidationException;
+use Paynecta\LaravelSdk\Services\BalanceService;
 use Paynecta\LaravelSdk\Services\BankService;
-use Paynecta\LaravelSdk\Services\CurrencyRatesService;
+use Paynecta\LaravelSdk\Services\CheckoutService;
+use Paynecta\LaravelSdk\Services\IntegrationService;
+use Paynecta\LaravelSdk\Services\TapFlowService;
+use Paynecta\LaravelSdk\Services\TransactionService;
+use Paynecta\LaravelSdk\Services\WebhookEndpointService;
 
+/**
+ * The connection to Paynecta.
+ *
+ * Authentication is two steps and this hides the first. The key pair goes
+ * once to POST /v1/auth/token as a Basic credential, and everything
+ * afterwards carries the access token it returns. The secret key is never a
+ * header on an ordinary call, which is the point of the exchange: one
+ * endpoint sees it, and checking it is that endpoint's whole job.
+ *
+ * The token is cached, because it lasts an hour and that endpoint allows ten
+ * requests a minute on purpose — it is where somebody would sit and guess at
+ * a key. The cache entry is keyed on the public key, so changing the pair
+ * cannot serve a token belonging to the account configured before it.
+ */
 class PaynectaClient
 {
-    protected string $apiKey;
-    protected string $email;
+    protected string $publicKey;
+    protected string $secretKey;
     protected string $baseUrl;
     protected int $timeout;
     protected bool $logging;
-    
-    protected ?PaymentLinkService $paymentLinkService = null;
-    protected ?PaymentService $paymentService = null;
-    protected ?BankService $bankService = null;
-    protected ?CurrencyRatesService $currencyRatesService = null;
 
-    public function __construct(?string $apiKey = null, ?string $email = null)
+    protected ?CheckoutService $checkouts = null;
+    protected ?TransactionService $transactions = null;
+    protected ?TapFlowService $tapflows = null;
+    protected ?WebhookEndpointService $webhooks = null;
+    protected ?IntegrationService $integrations = null;
+    protected ?BankService $banks = null;
+    protected ?BalanceService $balance = null;
+
+    public function __construct(?string $publicKey = null, ?string $secretKey = null)
     {
-        $this->apiKey = $apiKey ?? config('paynecta.api_key');
-        $this->email = $email ?? config('paynecta.email');
-        $this->baseUrl = config('paynecta.base_url', 'https://paynecta.co.ke/api/v1');
-        $this->timeout = config('paynecta.timeout', 30);
-        $this->logging = config('paynecta.logging', false);
+        $this->publicKey = (string) ($publicKey ?? config('paynecta.public_key'));
+        $this->secretKey = (string) ($secretKey ?? config('paynecta.secret_key'));
+        $this->baseUrl = rtrim((string) config('paynecta.base_url', 'https://api.paynecta.co.ke'), '/');
+        $this->timeout = (int) config('paynecta.timeout', 30);
+        $this->logging = (bool) config('paynecta.logging', false);
 
-        if (empty($this->apiKey) || empty($this->email)) {
+        if ($this->publicKey === '' || $this->secretKey === '') {
             throw new AuthenticationException(
-                'API Key and Email are required. Set PAYNECTA_API_KEY and PAYNECTA_EMAIL in your .env file.'
+                'Paynecta needs a key pair. Set PAYNECTA_PUBLIC_KEY and PAYNECTA_SECRET_KEY '
+                . 'in your .env, from Developers, API keys in your dashboard.'
             );
         }
     }
 
-    /**
-     * Get Payment Link Service instance
-     * 
-     * @return PaymentLinkService
-     */
-    public function paymentLinks(): PaymentLinkService
+    /** Opening a checkout for a customer, and asking what became of it. */
+    public function checkouts(): CheckoutService
     {
-        if (!$this->paymentLinkService) {
-            $this->paymentLinkService = new PaymentLinkService($this);
-        }
-        
-        return $this->paymentLinkService;
+        return $this->checkouts ??= new CheckoutService($this);
     }
 
-    /**
-     * Get Payment Service instance
-     * 
-     * @return PaymentService
-     */
-    public function payments(): PaymentService
+    /** The payments this business has taken. */
+    public function transactions(): TransactionService
     {
-        if (!$this->paymentService) {
-            $this->paymentService = new PaymentService($this);
-        }
-        
-        return $this->paymentService;
+        return $this->transactions ??= new TransactionService($this);
     }
 
-    /**
-     * Get Bank Service instance
-     * 
-     * @return BankService
-     */
+    /** The pages this business collects through. */
+    public function tapflows(): TapFlowService
+    {
+        return $this->tapflows ??= new TapFlowService($this);
+    }
+
+    /** Where Paynecta should tell you what happened. */
+    public function webhooks(): WebhookEndpointService
+    {
+        return $this->webhooks ??= new WebhookEndpointService($this);
+    }
+
+    /** This application, as it appears in the dashboard. */
+    public function integrations(): IntegrationService
+    {
+        return $this->integrations ??= new IntegrationService($this);
+    }
+
+    /** The banks Paynecta can settle to. */
     public function banks(): BankService
     {
-        if (!$this->bankService) {
-            $this->bankService = new BankService($this);
-        }
-        
-        return $this->bankService;
+        return $this->banks ??= new BankService($this);
+    }
+
+    /** What is left to spend on fees and verification messages. */
+    public function balance(): BalanceService
+    {
+        return $this->balance ??= new BalanceService($this);
     }
 
     /**
-     * Get Currency Rates Service instance
-     * 
-     * @return CurrencyRatesService
+     * Which business this key belongs to, and which world it reaches.
+     *
+     * The first call worth making: it answers "are my keys right, and am I
+     * in test or live" in one request, which are the two questions behind
+     * most of the time lost at the start of an integration.
      */
-    public function currencyRates(): CurrencyRatesService
+    public function whoami(): array
     {
-        if (!$this->currencyRatesService) {
-            $this->currencyRatesService = new CurrencyRatesService($this);
-        }
-        
-        return $this->currencyRatesService;
+        return $this->get('/v1/whoami');
+    }
+
+    public function get(string $path, array $query = []): array
+    {
+        return $this->send('GET', $path, $query);
+    }
+
+    public function post(string $path, array $body = []): array
+    {
+        return $this->send('POST', $path, $body);
+    }
+
+    public function put(string $path, array $body = []): array
+    {
+        return $this->send('PUT', $path, $body);
+    }
+
+    public function delete(string $path, array $body = []): array
+    {
+        return $this->send('DELETE', $path, $body);
     }
 
     /**
-     * Verify authentication and get user information
-     * 
-     * @return array
-     * @throws AuthenticationException
-     * @throws NotFoundException
-     * @throws PaynectaException
+     * An access token, from the key pair.
+     *
+     * A minute is taken off whatever we are told, so a token expiring
+     * mid-request is not how we find out it was close.
      */
-    public function verifyAuth(): array
+    public function accessToken(bool $fresh = false): string
     {
-        return $this->get('/auth/verify');
-    }
+        $key = $this->tokenCacheKey();
 
-    /**
-     * Make a GET request
-     * 
-     * @param string $endpoint
-     * @param array $params
-     * @return array
-     * @throws PaynectaException
-     */
-    public function get(string $endpoint, array $params = []): array
-    {
-        return $this->request('GET', $endpoint, $params);
-    }
-
-    /**
-     * Make a POST request
-     * 
-     * @param string $endpoint
-     * @param array $data
-     * @return array
-     * @throws PaynectaException
-     */
-    public function post(string $endpoint, array $data = []): array
-    {
-        return $this->request('POST', $endpoint, $data);
-    }
-
-    /**
-     * Make a PUT request
-     * 
-     * @param string $endpoint
-     * @param array $data
-     * @return array
-     * @throws PaynectaException
-     */
-    public function put(string $endpoint, array $data = []): array
-    {
-        return $this->request('PUT', $endpoint, $data);
-    }
-
-    /**
-     * Make a DELETE request
-     * 
-     * @param string $endpoint
-     * @return array
-     * @throws PaynectaException
-     */
-    public function delete(string $endpoint): array
-    {
-        return $this->request('DELETE', $endpoint);
-    }
-
-    /**
-     * Core request method
-     * 
-     * @param string $method
-     * @param string $endpoint
-     * @param array $data
-     * @return array
-     * @throws PaynectaException
-     */
-    protected function request(string $method, string $endpoint, array $data = []): array
-    {
-        $url = $this->baseUrl . $endpoint;
-
-        if ($this->logging) {
-            $this->log('info', "Paynecta API Request: {$method} {$url}", [
-                'data' => $data
-            ]);
+        if ($fresh) {
+            Cache::forget($key);
         }
 
-        try {
-            $request = Http::timeout($this->timeout)
-                ->withHeaders([
-                    'X-API-Key' => $this->apiKey,
-                    'X-User-Email' => $this->email,
-                    'Accept' => 'application/json',
-                    'Content-Type' => 'application/json',
-                ]);
-
-            $response = match(strtoupper($method)) {
-                'GET' => $request->get($url, $data),
-                'POST' => $request->post($url, $data),
-                'PUT' => $request->put($url, $data),
-                'DELETE' => $request->delete($url),
-                default => throw new PaynectaException("Unsupported HTTP method: {$method}")
-            };
-
-            if ($this->logging) {
-                $this->log('info', "Paynecta API Response: {$response->status()}", [
-                    'body' => $response->json()
-                ]);
-            }
-
-            return $this->handleResponse($response);
-
-        } catch (PaynectaException $e) {
-            throw $e;
-        } catch (\Exception $e) {
-            if ($this->logging) {
-                $this->log('error', "Paynecta API Error: {$e->getMessage()}");
-            }
-            throw new PaynectaException("Request failed: {$e->getMessage()}", 0, null, null, $e);
+        $cached = Cache::get($key);
+        if (is_string($cached) && $cached !== '') {
+            return $cached;
         }
+
+        $response = Http::timeout($this->timeout)
+            ->withHeaders(['Accept' => 'application/json'])
+            ->withBasicAuth($this->publicKey, $this->secretKey)
+            ->post($this->baseUrl . '/v1/auth/token');
+
+        if ($response->status() === 401 || $response->status() === 403) {
+            // The API refuses a wrong public key and a wrong secret
+            // identically on purpose, so there is nothing more specific to
+            // say here either.
+            throw new AuthenticationException(
+                $response->json('message') ?: 'Paynecta did not accept those keys.'
+            );
+        }
+
+        $token = $response->json('data.access_token');
+        if (! $response->successful() || ! is_string($token) || $token === '') {
+            throw new PaynectaException(
+                $response->json('message') ?: 'Could not get an access token from Paynecta.'
+            );
+        }
+
+        $ttl = (int) ($response->json('data.expires_in') ?: 3600);
+        Cache::put($key, $token, max(60, $ttl - 60));
+
+        return $token;
     }
 
-    /**
-     * Handle API response and throw appropriate exceptions
-     * 
-     * @param \Illuminate\Http\Client\Response $response
-     * @return array
-     * @throws PaynectaException
-     */
-    protected function handleResponse($response): array
+    /** Throws the token away, so the next call fetches a new one. */
+    public function forgetToken(): void
     {
-        $statusCode = $response->status();
-        $body = $response->json();
+        Cache::forget($this->tokenCacheKey());
+    }
 
-        if ($response->successful()) {
-            return $body;
+    protected function tokenCacheKey(): string
+    {
+        return 'paynecta.token.' . sha1($this->publicKey);
+    }
+
+    protected function send(string $method, string $path, array $payload): array
+    {
+        $url = $this->baseUrl . $path;
+
+        $this->log('Paynecta request', [
+            'method' => $method,
+            'url' => $url,
+            // The body, scrubbed. Never the token, and never a key.
+            'payload' => $this->scrub($payload),
+        ]);
+
+        $response = $this->dispatch($method, $url, $payload, $this->accessToken());
+
+        // One retry, and only on a 401.
+        //
+        // A token can expire between being handed out and being used: a
+        // queued job may sit for an hour, and a cache shared by several
+        // processes can hold one that another process has already replaced.
+        // Retrying once with a fresh token turns that into nothing, and
+        // limiting it to 401 means genuinely wrong keys fail immediately
+        // rather than being tried twice against a rate-limited endpoint.
+        if ($response->status() === 401) {
+            $response = $this->dispatch($method, $url, $payload, $this->accessToken(true));
         }
 
-        $message = $body['message'] ?? 'An error occurred';
-        $errorCode = $body['error_code'] ?? null;
+        $this->log('Paynecta response', [
+            'method' => $method,
+            'url' => $url,
+            'status' => $response->status(),
+        ]);
 
-        throw match($statusCode) {
-            400 => new ValidationException($message, $errorCode, $body),
-            401 => new AuthenticationException($message, $errorCode, $body),
-            404 => new NotFoundException($message, $errorCode, $body),
-            429 => new RateLimitException($message, $errorCode, $body),
-            default => new PaynectaException($message, $statusCode, $errorCode, $body)
+        return $this->interpret($response);
+    }
+
+    protected function dispatch(string $method, string $url, array $payload, string $token): Response
+    {
+        /** @var PendingRequest $request */
+        $request = Http::timeout($this->timeout)
+            ->withToken($token)
+            ->withHeaders(['Accept' => 'application/json']);
+
+        return match (strtoupper($method)) {
+            'GET' => $request->get($url, $payload),
+            'POST' => $request->post($url, $payload),
+            'PUT' => $request->put($url, $payload),
+            'DELETE' => $request->delete($url, $payload),
+            default => throw new PaynectaException("Unsupported HTTP method: {$method}"),
         };
     }
 
     /**
-     * Set custom timeout in seconds
-     * 
-     * @param int $seconds
-     * @return self
+     * Turn an answer into data, or into the right exception.
+     *
+     * Paynecta's refusals carry a message to show and a next step to take,
+     * and both are kept: an integrator reading "That page charges a set
+     * amount" knows what to do, where "422 Unprocessable Entity" starts a
+     * support conversation.
      */
-    public function setTimeout(int $seconds): self
+    protected function interpret(Response $response): array
     {
-        $this->timeout = $seconds;
-        return $this;
+        $body = $response->json() ?? [];
+        $message = $body['message'] ?? 'Paynecta could not complete that request.';
+        $next = $body['next_step'] ?? null;
+        $full = $next ? rtrim($message, '.') . '. ' . $next : $message;
+
+        if ($response->successful()) {
+            return is_array($body['data'] ?? null) ? $body['data'] : $body;
+        }
+
+        throw match ($response->status()) {
+            401, 403 => new AuthenticationException($full, $response->status()),
+            404 => new NotFoundException($full, 404),
+            422 => new ValidationException($full, 422),
+            429 => new RateLimitException($full, 429),
+            default => new PaynectaException($full, $response->status()),
+        };
     }
 
     /**
-     * Set custom base URL (useful for testing)
-     * 
-     * @param string $url
-     * @return self
+     * Anything that should not end up in a log file.
+     *
+     * A payload is logged to help somebody work out what a call sent, and a
+     * log file is read by more people and kept longer than anybody intends.
      */
-    public function setBaseUrl(string $url): self
+    protected function scrub(array $payload): array
     {
-        $this->baseUrl = rtrim($url, '/');
-        return $this;
+        foreach (['secret', 'secret_key', 'public_key', 'client_secret', 'token', 'access_token'] as $key) {
+            if (array_key_exists($key, $payload)) {
+                $payload[$key] = '[redacted]';
+            }
+        }
+
+        return $payload;
     }
 
-    /**
-     * Enable or disable logging
-     * 
-     * @param bool $enabled
-     * @return self
-     */
-    public function setLogging(bool $enabled): self
+    protected function log(string $message, array $context): void
     {
-        $this->logging = $enabled;
-        return $this;
+        if (! $this->logging) {
+            return;
+        }
+
+        Log::channel(config('paynecta.log_channel'))->info($message, $context);
     }
 
-    /**
-     * Log a message
-     * 
-     * @param string $level
-     * @param string $message
-     * @param array $context
-     * @return void
-     */
-    protected function log(string $level, string $message, array $context = []): void
+    public function baseUrl(): string
     {
-        $channel = config('paynecta.log_channel', 'stack');
-        Log::channel($channel)->$level($message, $context);
+        return $this->baseUrl;
     }
 }

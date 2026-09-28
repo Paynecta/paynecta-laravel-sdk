@@ -3,304 +3,166 @@
 namespace Paynecta\LaravelSdk\Services;
 
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
-use Paynecta\LaravelSdk\Events\PaymentCompletedEvent;
 use Paynecta\LaravelSdk\Events\PaymentFailedEvent;
-use Paynecta\LaravelSdk\Events\PaymentCancelledEvent;
+use Paynecta\LaravelSdk\Events\PaymentPendingEvent;
+use Paynecta\LaravelSdk\Events\PaymentSettledEvent;
+use Paynecta\LaravelSdk\Exceptions\WebhookException;
 
+/**
+ * Deliveries arriving from Paynecta, verified before they are believed.
+ *
+ * Until 2.0 nothing here was verified. validateWebhook() checked that five
+ * fields were present and the body was then acted on, so anybody who knew
+ * the URL — a fixed default path — could post a payment.completed and have
+ * an order marked paid. That is the bug this class exists to have fixed.
+ *
+ * The scheme is published at docs.paynecta.co.ke/api/webhooks: HMAC-SHA256
+ * over the timestamp, a full stop, then the exact bytes of the body, hex
+ * encoded, inside five minutes.
+ */
 class WebhookService
 {
+    public const HEADER_SIGNATURE = 'Paynecta-Signature';
+    public const HEADER_TIMESTAMP = 'Paynecta-Timestamp';
+    public const HEADER_EVENT = 'Paynecta-Event';
+    public const HEADER_DELIVERY = 'Paynecta-Delivery';
+
     /**
-     * Handle incoming webhook request
-     * 
-     * @param Request $request
-     * @return array
+     * Handle one delivery.
+     *
+     * @throws WebhookException when it cannot be trusted. The controller
+     *                          turns that into a 401, which is the honest
+     *                          answer: we could not tell who sent this.
      */
-    public function handleWebhook(Request $request): array
+    public function handle(Request $request): array
     {
-        $payload = $request->all();
-        
-        // Log webhook if logging is enabled
-        if (config('paynecta.logging')) {
-            $this->logWebhook($payload);
+        $this->verify($request);
+
+        $payload = $request->json()->all();
+        $event = (string) ($payload['event'] ?? $request->header(self::HEADER_EVENT, ''));
+        $delivery = (string) $request->header(self::HEADER_DELIVERY, '');
+
+        // Accepted and acted on in no way at all. A test send is somebody
+        // pressing a button in their dashboard; treating it as news about
+        // money would mark an order paid from the settings screen.
+        if ($event === 'webhook.test') {
+            return ['handled' => false, 'event' => $event, 'reason' => 'test'];
         }
-        
-        // Validate webhook payload
-        if (!$this->validateWebhook($payload)) {
-            return [
-                'success' => false,
-                'message' => 'Invalid webhook payload'
-            ];
+
+        // We would rather tell you twice than not at all, so repeats are
+        // expected. The cache is a convenience and not a ledger: clear it
+        // and a repeat gets through, which is why your own listener should
+        // still be safe to run twice.
+        if ($delivery !== '' && $this->alreadySeen($delivery)) {
+            return ['handled' => false, 'event' => $event, 'reason' => 'duplicate'];
         }
-        
-        // Check for duplicate events
-        if ($this->isDuplicateEvent($payload['event_id'])) {
-            return [
-                'success' => true,
-                'message' => 'Event already processed'
-            ];
+
+        $payment = $payload['data'] ?? [];
+
+        match ($event) {
+            'payment.settled' => event(new PaymentSettledEvent($payment)),
+            'payment.failed' => event(new PaymentFailedEvent($payment)),
+            'payment.pending' => event(new PaymentPendingEvent($payment)),
+            default => $this->unknown($event, $payment),
+        };
+
+        if ($delivery !== '') {
+            $this->remember($delivery);
         }
-        
-        // Process webhook based on event type
-        $this->processWebhook($payload);
-        
-        return [
-            'success' => true,
-            'message' => 'Webhook processed successfully'
-        ];
+
+        return ['handled' => true, 'event' => $event];
     }
-    
+
     /**
-     * Validate webhook payload structure
-     * 
-     * @param array $payload
-     * @return bool
+     * Whether this really came from Paynecta.
+     *
+     * @throws WebhookException
      */
-    protected function validateWebhook(array $payload): bool
+    public function verify(Request $request): void
     {
-        $requiredFields = ['event_type', 'event_id', 'timestamp', 'link_id', 'data'];
-        
-        foreach ($requiredFields as $field) {
-            if (!isset($payload[$field])) {
-                return false;
-            }
+        $secret = (string) config('paynecta.webhook_secret', '');
+
+        // Fails closed, deliberately. An endpoint with no secret cannot
+        // tell us from a stranger, and the alternative — accepting anything
+        // while unconfigured — is exactly the hole this replaces.
+        if ($secret === '') {
+            throw new WebhookException(
+                'No webhook signing secret is set, so deliveries cannot be verified. '
+                . 'Register your address with Paynecta and put the secret it returns in PAYNECTA_WEBHOOK_SECRET.'
+            );
         }
-        
-        return true;
+
+        $signature = trim((string) $request->header(self::HEADER_SIGNATURE, ''));
+        $timestamp = trim((string) $request->header(self::HEADER_TIMESTAMP, ''));
+
+        if ($signature === '' || $timestamp === '' || ! ctype_digit($timestamp)) {
+            throw new WebhookException('This delivery carries no usable signature headers.');
+        }
+
+        $tolerance = (int) config('paynecta.webhook_tolerance', 300);
+        if (abs(time() - (int) $timestamp) > $tolerance) {
+            // A signature does not expire on its own, so without a window a
+            // delivery captured once could be replayed for ever.
+            throw new WebhookException('This delivery is too old to accept.');
+        }
+
+        // The raw body, byte for byte. Re-encoding a decoded payload would
+        // verify a different string from the one that was signed, which is
+        // the single most common way a verification routine comes to pass
+        // everything.
+        $expected = hash_hmac('sha256', $timestamp . '.' . $request->getContent(), $secret);
+
+        // Constant time. A plain comparison returns sooner the earlier it
+        // finds a difference, and that timing is enough to build a valid
+        // signature one character at a time.
+        if (! hash_equals($expected, $signature)) {
+            throw new WebhookException('This delivery was not signed with your secret.');
+        }
     }
-    
-    /**
-     * Check if event has already been processed
-     * 
-     * @param string $eventId
-     * @return bool
-     */
-    protected function isDuplicateEvent(string $eventId): bool
+
+    protected function alreadySeen(string $delivery): bool
     {
-        // Check if duplicate detection is enabled
-        if (!config('paynecta.webhook_duplicate_detection', true)) {
+        if (! config('paynecta.prevent_duplicates', true)) {
             return false;
         }
-        
-        // Use cache to track processed events (store for 24 hours)
-        $cacheKey = "paynecta_webhook_event_{$eventId}";
-        
-        if (cache()->has($cacheKey)) {
-            return true;
+
+        return Cache::has($this->deliveryKey($delivery));
+    }
+
+    protected function remember(string $delivery): void
+    {
+        if (! config('paynecta.prevent_duplicates', true)) {
+            return;
         }
-        
-        // Mark event as processed
-        cache()->put($cacheKey, true, now()->addDay());
-        
-        return false;
+
+        Cache::put(
+            $this->deliveryKey($delivery),
+            true,
+            (int) config('paynecta.duplicate_window', 86400)
+        );
     }
-    
-    /**
-     * Process webhook based on event type
-     * 
-     * @param array $payload
-     * @return void
-     */
-    protected function processWebhook(array $payload): void
+
+    protected function deliveryKey(string $delivery): string
     {
-        $eventType = $payload['event_type'];
-        
-        match ($eventType) {
-            'payment.completed' => $this->handlePaymentCompleted($payload),
-            'payment.failed' => $this->handlePaymentFailed($payload),
-            'payment.cancelled' => $this->handlePaymentCancelled($payload),
-            default => $this->handleUnknownEvent($payload)
-        };
+        return 'paynecta.delivery.' . sha1($delivery);
     }
-    
+
     /**
-     * Handle payment completed webhook
-     * 
-     * @param array $payload
-     * @return void
+     * An event we do not know.
+     *
+     * Logged and accepted rather than refused. A new event name is us adding
+     * something, not a stranger forging something: it arrived with a valid
+     * signature, and answering with an error would put a legitimate delivery
+     * in the merchant's failed list and eventually get the address switched
+     * off.
      */
-    protected function handlePaymentCompleted(array $payload): void
+    protected function unknown(string $event, array $payment): void
     {
-        event(new PaymentCompletedEvent($payload));
-        
-        if (config('paynecta.logging')) {
-            Log::channel(config('paynecta.log_channel', 'stack'))
-                ->info('Paynecta: Payment Completed', [
-                    'reference' => $payload['data']['transaction']['reference'] ?? null,
-                    'amount' => $payload['data']['transaction']['amount'] ?? null,
-                    'receipt' => $payload['data']['MpesaReceiptNumber'] ?? null
-                ]);
-        }
-    }
-    
-    /**
-     * Handle payment failed webhook
-     * 
-     * @param array $payload
-     * @return void
-     */
-    protected function handlePaymentFailed(array $payload): void
-    {
-        event(new PaymentFailedEvent($payload));
-        
-        if (config('paynecta.logging')) {
-            Log::channel(config('paynecta.log_channel', 'stack'))
-                ->warning('Paynecta: Payment Failed', [
-                    'reference' => $payload['data']['transaction']['reference'] ?? null,
-                    'reason' => $payload['data']['reason'] ?? null
-                ]);
-        }
-    }
-    
-    /**
-     * Handle payment cancelled webhook
-     * 
-     * @param array $payload
-     * @return void
-     */
-    protected function handlePaymentCancelled(array $payload): void
-    {
-        event(new PaymentCancelledEvent($payload));
-        
-        if (config('paynecta.logging')) {
-            Log::channel(config('paynecta.log_channel', 'stack'))
-                ->info('Paynecta: Payment Cancelled', [
-                    'reference' => $payload['data']['transaction']['reference'] ?? null,
-                    'reason' => $payload['data']['reason'] ?? null
-                ]);
-        }
-    }
-    
-    /**
-     * Handle unknown event type
-     * 
-     * @param array $payload
-     * @return void
-     */
-    protected function handleUnknownEvent(array $payload): void
-    {
-        if (config('paynecta.logging')) {
-            Log::channel(config('paynecta.log_channel', 'stack'))
-                ->warning('Paynecta: Unknown webhook event type', [
-                    'event_type' => $payload['event_type'] ?? 'unknown'
-                ]);
-        }
-    }
-    
-    /**
-     * Log webhook payload
-     * 
-     * @param array $payload
-     * @return void
-     */
-    protected function logWebhook(array $payload): void
-    {
-        Log::channel(config('paynecta.log_channel', 'stack'))
-            ->info('Paynecta Webhook Received', [
-                'event_type' => $payload['event_type'] ?? null,
-                'event_id' => $payload['event_id'] ?? null,
-                'timestamp' => $payload['timestamp'] ?? null,
-                'payload' => $payload
-            ]);
-    }
-    
-    /**
-     * Extract transaction reference from payload
-     * 
-     * @param array $payload
-     * @return string|null
-     */
-    public function getTransactionReference(array $payload): ?string
-    {
-        return $payload['data']['transaction']['reference'] ?? null;
-    }
-    
-    /**
-     * Extract transaction amount from payload
-     * 
-     * @param array $payload
-     * @return float|null
-     */
-    public function getAmount(array $payload): ?float
-    {
-        $amount = $payload['data']['transaction']['amount'] ?? null;
-        return $amount ? (float) $amount : null;
-    }
-    
-    /**
-     * Extract M-Pesa receipt number from payload (completed payments only)
-     * 
-     * @param array $payload
-     * @return string|null
-     */
-    public function getMpesaReceiptNumber(array $payload): ?string
-    {
-        return $payload['data']['MpesaReceiptNumber'] ?? null;
-    }
-    
-    /**
-     * Extract customer mobile number from payload
-     * 
-     * @param array $payload
-     * @return string|null
-     */
-    public function getCustomerMobile(array $payload): ?string
-    {
-        return $payload['data']['customer']['mobile_number'] ?? null;
-    }
-    
-    /**
-     * Extract failure/cancellation reason from payload
-     * 
-     * @param array $payload
-     * @return string|null
-     */
-    public function getReason(array $payload): ?string
-    {
-        return $payload['data']['reason'] ?? null;
-    }
-    
-    /**
-     * Get transaction status from payload
-     * 
-     * @param array $payload
-     * @return string|null
-     */
-    public function getStatus(array $payload): ?string
-    {
-        return $payload['data']['transaction']['status'] ?? null;
-    }
-    
-    /**
-     * Check if webhook is for completed payment
-     * 
-     * @param array $payload
-     * @return bool
-     */
-    public function isPaymentCompleted(array $payload): bool
-    {
-        return ($payload['event_type'] ?? null) === 'payment.completed';
-    }
-    
-    /**
-     * Check if webhook is for failed payment
-     * 
-     * @param array $payload
-     * @return bool
-     */
-    public function isPaymentFailed(array $payload): bool
-    {
-        return ($payload['event_type'] ?? null) === 'payment.failed';
-    }
-    
-    /**
-     * Check if webhook is for cancelled payment
-     * 
-     * @param array $payload
-     * @return bool
-     */
-    public function isPaymentCancelled(array $payload): bool
-    {
-        return ($payload['event_type'] ?? null) === 'payment.cancelled';
+        Log::channel(config('paynecta.log_channel'))->info(
+            'Paynecta sent an event this package does not handle',
+            ['event' => $event, 'reference' => $payment['reference'] ?? null]
+        );
     }
 }

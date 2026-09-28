@@ -1,0 +1,26 @@
+# Dependencies are resolved by Composer from composer.json. They were
+# committed until 2.0, which made every diff unreadable and every clone
+# 8,458 files heavier than the package it contains.
+/vendor/
+composer.lock
+
+# A library pins nothing. composer.lock belongs to an application, which
+# decides the versions it runs; committing one here would suggest this
+# package dictates them and would go stale against every consumer.
+
+.phpunit.result.cache
+.DS_Store
+ENDPHP
+mv .gitignore .gitignore 2>/dev/null; cat > .gitignore <<'ENDGI'
+# Dependencies are resolved by Composer from composer.json. They were
+# committed until 2.0, which made every diff unreadable and every clone
+# thousands of files heavier than the package it contains.
+/vendor/
+
+# A library pins nothing. composer.lock belongs to an application, which
+# decides the versions it actually runs; one committed here would suggest
+# this package dictates them, and would go stale against every consumer.
+composer.lock
+
+.phpunit.result.cache
+.DS_Store
