@@ -173,8 +173,9 @@ Paynecta::transactions()->find('PN7K4QX2');
 
 Paynecta::webhooks()->all();                      // addresses, with secrets
 Paynecta::webhooks()->registerSelf();             // point us at this app
-Paynecta::webhooks()->disable();
-Paynecta::webhooks()->remove();
+Paynecta::webhooks()->disable();                  // pause this app's address
+Paynecta::webhooks()->remove();                   // forget this app's address
+Paynecta::webhooks()->removeById('whe_...');      // forget any one address
 
 Paynecta::integrations()->register();             // show under Installations
 Paynecta::integrations()->all();

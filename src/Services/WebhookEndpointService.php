@@ -31,9 +31,10 @@ class WebhookEndpointService
     /**
      * Point Paynecta at an address, and get the signing secret back.
      *
-     * Idempotent: calling it again with the same address keeps the existing
-     * secret rather than rolling it, so re-running your setup does not
-     * silently invalidate a secret already deployed.
+     * Adds the address beside any the business already has; it never
+     * replaces one. Idempotent: calling it again with the same address keeps
+     * the existing secret rather than rolling it, so re-running your setup
+     * does not silently invalidate a secret already deployed.
      *
      * **Keep the secret it returns.** Put it in PAYNECTA_WEBHOOK_SECRET.
      * Without it this package refuses every delivery, which is the right
@@ -80,30 +81,48 @@ class WebhookEndpointService
      */
     public function registerSelf(?string $tapflow = null): array
     {
-        return $this->register(
-            url(config('paynecta.webhook_path', 'paynecta/webhook')),
-            $tapflow
-        );
+        return $this->register($this->ownUrl(), $tapflow);
     }
 
-    /** Stop deliveries to an address, without forgetting it. */
-    public function disable(?string $tapflow = null): array
+    /**
+     * Stop deliveries to an address, without forgetting it.
+     *
+     * A business can have several addresses, so this names one: the URL you
+     * pass, or this application's own webhook route when you pass none.
+     */
+    public function disable(?string $tapflow = null, ?string $url = null): array
     {
-        $existing = $this->all();
-        $url = $existing[0]['url'] ?? null;
-
-        if (! is_string($url)) {
-            throw new ValidationException('There is no webhook address set to disable.');
-        }
-
-        return $this->register($url, $tapflow, false);
+        return $this->register($url ?? $this->ownUrl(), $tapflow, false);
     }
 
-    /** Forget an address entirely. */
-    public function remove(?string $tapflow = null): array
+    /**
+     * Forget an address entirely.
+     *
+     * The URL you pass, or this application's own webhook route when you
+     * pass none. Any other addresses the business has are untouched.
+     */
+    public function remove(?string $tapflow = null, ?string $url = null): array
     {
-        return $this->client->delete('/v1/webhooks', array_filter([
+        // In the query string, which is where the API reads them. Sent as a
+        // body, the TapFlow was ignored and the business's common address
+        // was the one removed.
+        $query = http_build_query(array_filter([
             'tapflow' => $tapflow,
+            'url' => $url ?? $this->ownUrl(),
         ], fn ($value) => $value !== null && $value !== ''));
+
+        return $this->client->delete('/v1/webhooks?'.$query);
+    }
+
+    /** Forget one address by the id GET /v1/webhooks lists it under. */
+    public function removeById(string $id): array
+    {
+        return $this->client->delete('/v1/webhooks/'.rawurlencode($id));
+    }
+
+    /** Where this package receives deliveries. */
+    protected function ownUrl(): string
+    {
+        return url(config('paynecta.webhook_path', 'paynecta/webhook'));
     }
 }
